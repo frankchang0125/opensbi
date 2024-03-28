@@ -21,6 +21,7 @@
 #include <sbi/sbi_hsm.h>
 #include <sbi/sbi_init.h>
 #include <sbi/sbi_ipi.h>
+#include <sbi/sbi_platform.h>
 #include <sbi/sbi_scratch.h>
 #include <sbi/sbi_system.h>
 #include <sbi/sbi_timer.h>
@@ -121,7 +122,7 @@ int sbi_hsm_hart_interruptible_mask(const struct sbi_domain *dom,
 	int hstate, ret;
 	u32 i;
 
-	ret = sbi_domain_get_assigned_hartmask(dom, mask);
+	ret = sbi_domain_get_possible_hartmask(dom, mask);
 	if (ret)
 		return ret;
 

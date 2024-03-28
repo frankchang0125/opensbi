@@ -92,6 +92,22 @@ int sbi_domain_get_assigned_hartmask(const struct sbi_domain *dom,
 	return ret;
 }
 
+int sbi_domain_get_possible_hartmask(const struct sbi_domain *dom,
+				     struct sbi_hartmask *mask)
+{
+	ulong ret = 0;
+	struct sbi_domain *tdom = (struct sbi_domain *)dom;
+
+	if (!dom) {
+		sbi_hartmask_clear_all(mask);
+		return 0;
+	}
+
+	sbi_hartmask_copy(mask, (struct sbi_hartmask *)tdom->possible_harts);
+
+	return ret;
+}
+
 void sbi_domain_memregion_init(unsigned long addr,
 				unsigned long size,
 				unsigned long flags,

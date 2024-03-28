@@ -262,6 +262,15 @@ int sbi_domain_get_assigned_hartmask(const struct sbi_domain *dom,
 				     struct sbi_hartmask *mask);
 
 /**
+ * Get the possible HART mask for given domain
+ * @param dom pointer to domain
+ * @param mask the output hartmask to fill
+ * @return 0 on success and SBI_Exxx (< 0) on failure
+ */
+int sbi_domain_get_possible_hartmask(const struct sbi_domain *dom,
+				     struct sbi_hartmask *mask);
+
+/**
  * Initialize a domain memory region based on it's physical
  * address and size.
  *
