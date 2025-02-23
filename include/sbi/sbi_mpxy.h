@@ -147,6 +147,9 @@ struct sbi_mpxy_channel {
 /** Register a Message proxy channel */
 int sbi_mpxy_register_channel(struct sbi_mpxy_channel *channel);
 
+/** Find a registered Message proxy channel by channel ID */
+struct sbi_mpxy_channel *sbi_mpxy_find_channel(u32 channel_id);
+
 /** Initialize Message proxy subsystem */
 int sbi_mpxy_init(struct sbi_scratch *scratch);
 

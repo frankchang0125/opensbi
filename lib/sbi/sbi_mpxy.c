@@ -145,7 +145,7 @@ static inline bool mpxy_is_std_attr(u32 attr_id)
 }
 
 /** Find channel_id in registered channels list */
-static struct sbi_mpxy_channel *mpxy_find_channel(u32 channel_id)
+struct sbi_mpxy_channel *sbi_mpxy_find_channel(u32 channel_id)
 {
 	struct sbi_mpxy_channel *channel;
 
@@ -223,7 +223,7 @@ int sbi_mpxy_register_channel(struct sbi_mpxy_channel *channel)
 	if (!channel)
 		return SBI_EINVAL;
 
-	if (mpxy_find_channel(channel->channel_id))
+	if (sbi_mpxy_find_channel(channel->channel_id))
 		return SBI_EALREADY;
 
 	/* Initialize channel specific attributes */
@@ -450,7 +450,7 @@ int sbi_mpxy_read_attrs(u32 channel_id, u32 base_attr_id, u32 attr_count)
 	if (!mpxy_shmem_enabled(ms))
 		return SBI_ERR_NO_SHMEM;
 
-	struct sbi_mpxy_channel *channel = mpxy_find_channel(channel_id);
+	struct sbi_mpxy_channel *channel = sbi_mpxy_find_channel(channel_id);
 	if (!channel)
 		return SBI_ERR_NOT_SUPPORTED;
 
@@ -601,7 +601,7 @@ int sbi_mpxy_write_attrs(u32 channel_id, u32 base_attr_id, u32 attr_count)
 	if (!mpxy_shmem_enabled(ms))
 		return SBI_ERR_NO_SHMEM;
 
-	channel = mpxy_find_channel(channel_id);
+	channel = sbi_mpxy_find_channel(channel_id);
 	if (!channel)
 		return SBI_ERR_NOT_SUPPORTED;
 
@@ -691,7 +691,7 @@ int sbi_mpxy_send_message(u32 channel_id, u8 msg_id,
 	if (!mpxy_shmem_enabled(ms))
 		return SBI_ERR_NO_SHMEM;
 
-	channel = mpxy_find_channel(channel_id);
+	channel = sbi_mpxy_find_channel(channel_id);
 	if (!channel)
 		return SBI_ERR_NOT_SUPPORTED;
 
@@ -748,7 +748,7 @@ int sbi_mpxy_get_notification_events(u32 channel_id, unsigned long *events_len)
 	if (!mpxy_shmem_enabled(ms))
 		return SBI_ERR_NO_SHMEM;
 
-	channel = mpxy_find_channel(channel_id);
+	channel = sbi_mpxy_find_channel(channel_id);
 	if (!channel || !channel->get_notification_events)
 		return SBI_ERR_NOT_SUPPORTED;
 
