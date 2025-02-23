@@ -38,6 +38,10 @@ config FDT_MPXY_RPMI_PERFORMANCE
 	bool "MPXY driver for RPMI performance service group"
 	default n
 
+config FDT_MPXY_RPMI_OPTEE
+	bool "MPXY driver for RPMI OP-TEE service group"
+	default n
+
 endif
 
 endmenu
