@@ -16,6 +16,7 @@
 #include <sbi/sbi_hartmask.h>
 #include <sbi/sbi_domain_context.h>
 #include <sbi/sbi_domain_data.h>
+#include <sbi/sbi_hwiso.h>
 
 struct sbi_scratch;
 
@@ -215,6 +216,9 @@ struct sbi_domain {
 	bool system_reset_allowed;
 	/** Is domain allowed to suspend the system */
 	bool system_suspend_allowed;
+	/** Hardware isolation contexts for registered mechanisms */
+	struct sbi_hwiso_domain_ctx *hwiso_ctxs;
+	u32 hwiso_ctx_count;
 	/** Identifies whether to include the firmware region */
 	bool fw_region_inited;
 };
