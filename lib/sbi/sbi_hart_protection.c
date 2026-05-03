@@ -20,24 +20,35 @@ struct sbi_hart_protection *sbi_hart_protection_best(void)
 
 int sbi_hart_protection_register(struct sbi_hart_protection *hprot)
 {
-	struct sbi_hart_protection *pos = NULL;
-	bool found_pos = false;
+	struct sbi_hart_protection *pos = NULL, *last_same_group = NULL;
 
 	if (!hprot)
 		return SBI_EINVAL;
 
+	/*
+	 * Keep providers grouped by group_id and sorted by descending rating
+	 * within each group. The first provider found for a group is the best.
+	 */
 	sbi_list_for_each_entry(pos, &hart_protection_list, head) {
-		if (hprot->rating > pos->rating) {
-			found_pos = true;
-			break;
-		}
+		/* Skip different groups. */
+		if (pos->group_id != hprot->group_id)
+			continue;
+
+		if (hprot->rating > pos->rating)
+			goto add_before_pos;
+
+		last_same_group = pos;
 	}
 
-	if (found_pos)
-		sbi_list_add_tail(&hprot->head, &pos->head);
+	if (last_same_group)
+		sbi_list_add(&hprot->head, &last_same_group->head);
 	else
 		sbi_list_add_tail(&hprot->head, &hart_protection_list);
 
+	return 0;
+
+add_before_pos:
+	sbi_list_add_tail(&hprot->head, &pos->head);
 	return 0;
 }
 
@@ -51,42 +62,115 @@ void sbi_hart_protection_unregister(struct sbi_hart_protection *hprot)
 
 int sbi_hart_protection_configure(struct sbi_scratch *scratch)
 {
-	struct sbi_hart_protection *hprot = sbi_hart_protection_best();
+	struct sbi_hart_protection *hprot = NULL, *best;
+	sbi_hart_prot_group_id group_id;
+	int ret;
 
-	if (!hprot)
-		return 0;
-	if (!hprot->configure)
-		return SBI_ENOSYS;
+	/* Find the best hart protection per group. */
+	for (group_id = 0; group_id < SBI_HART_PROT_GROUP_MAX; group_id++) {
+		best = NULL;
 
-	return hprot->configure(scratch);
+		sbi_list_for_each_entry(hprot, &hart_protection_list, head) {
+			if (hprot->group_id != group_id)
+				continue;
+
+			best = hprot;
+			break;
+		}
+
+		if (best) {
+			if (!best->configure)
+				return SBI_ENOSYS;
+
+			ret = best->configure(scratch);
+			if (ret)
+				return ret;
+		}
+	}
+
+	return 0;
 }
 
 void sbi_hart_protection_unconfigure(struct sbi_scratch *scratch)
 {
-	struct sbi_hart_protection *hprot = sbi_hart_protection_best();
+	struct sbi_hart_protection *hprot = NULL, *best;
+	sbi_hart_prot_group_id group_id;
 
-	if (!hprot || !hprot->unconfigure)
-		return;
+	/* Find the best hart protection per group. */
+	for (group_id = 0; group_id < SBI_HART_PROT_GROUP_MAX; group_id++) {
+		best = NULL;
 
-	hprot->unconfigure(scratch);
+		sbi_list_for_each_entry(hprot, &hart_protection_list, head) {
+			if (hprot->group_id != group_id)
+				continue;
+
+			best = hprot;
+			break;
+		}
+
+		if (best) {
+			if (best->unconfigure)
+				best->unconfigure(scratch);
+		}
+	}
 }
 
 int sbi_hart_protection_map_range(unsigned long base, unsigned long size)
 {
-	struct sbi_hart_protection *hprot = sbi_hart_protection_best();
+	struct sbi_hart_protection *hprot = NULL, *best;
+	sbi_hart_prot_group_id group_id;
+	int ret;
 
-	if (!hprot || !hprot->map_range)
-		return 0;
+	/* Find the best hart protection per group. */
+	for (group_id = 0; group_id < SBI_HART_PROT_GROUP_MAX; group_id++) {
+		best = NULL;
 
-	return hprot->map_range(sbi_scratch_thishart_ptr(), base, size);
+		sbi_list_for_each_entry(hprot, &hart_protection_list, head) {
+			if (hprot->group_id != group_id)
+				continue;
+
+			best = hprot;
+			break;
+		}
+
+		if (best) {
+			if (best->map_range) {
+				ret = best->map_range(sbi_scratch_thishart_ptr(), base, size);
+				if (ret)
+					return ret;
+			}
+		}
+	}
+
+	return 0;
 }
 
 int sbi_hart_protection_unmap_range(unsigned long base, unsigned long size)
 {
-	struct sbi_hart_protection *hprot = sbi_hart_protection_best();
+	struct sbi_hart_protection *hprot = NULL, *best;
+	sbi_hart_prot_group_id group_id;
+	int ret;
 
-	if (!hprot || !hprot->unmap_range)
-		return 0;
+	/* Find the best hart protection per group. */
+	for (group_id = 0; group_id < SBI_HART_PROT_GROUP_MAX; group_id++) {
+		best = NULL;
 
-	return hprot->unmap_range(sbi_scratch_thishart_ptr(), base, size);
+		sbi_list_for_each_entry(hprot, &hart_protection_list, head) {
+			if (hprot->group_id != group_id)
+				continue;
+
+			best = hprot;
+			break;
+		}
+
+		if (best) {
+			if (best->unmap_range) {
+				ret = best->unmap_range(sbi_scratch_thishart_ptr(), base, size);
+				if (ret)
+					return ret;
+			}
+		}
+	}
+
+	return 0;
 }

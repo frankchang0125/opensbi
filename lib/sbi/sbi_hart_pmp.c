@@ -313,6 +313,7 @@ static void sbi_hart_pmp_unconfigure(struct sbi_scratch *scratch)
 
 static struct sbi_hart_protection pmp_protection = {
 	.name = "pmp",
+	.group_id = SBI_HART_PROT_GROUP_PMP,
 	.rating = 100,
 	.configure = sbi_hart_oldpmp_configure,
 	.unconfigure = sbi_hart_pmp_unconfigure,
@@ -320,6 +321,7 @@ static struct sbi_hart_protection pmp_protection = {
 
 static struct sbi_hart_protection epmp_protection = {
 	.name = "epmp",
+	.group_id = SBI_HART_PROT_GROUP_PMP,
 	.rating = 200,
 	.configure = sbi_hart_smepmp_configure,
 	.unconfigure = sbi_hart_pmp_unconfigure,

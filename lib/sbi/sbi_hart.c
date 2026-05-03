@@ -17,6 +17,7 @@
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_hart.h>
 #include <sbi/sbi_hart_pmp.h>
+#include <sbi/sbi_hart_smmpt.h>
 #include <sbi/sbi_platform.h>
 #include <sbi/sbi_pmu.h>
 #include <sbi/sbi_string.h>
@@ -394,6 +395,9 @@ const struct sbi_hart_ext_data sbi_hart_ext[] = {
 	__SBI_HART_EXT_DATA(ssctr, SBI_HART_EXT_SSCTR),
 	__SBI_HART_EXT_DATA(ssqosid, SBI_HART_EXT_SSQOSID),
 	__SBI_HART_EXT_DATA(ssstateen, SBI_HART_EXT_SSSTATEEN),
+	__SBI_HART_EXT_DATA(svinval, SBI_HART_EXT_SVINVAL),
+	__SBI_HART_EXT_DATA(smsdid, SBI_HART_EXT_SMSDID),
+	__SBI_HART_EXT_DATA(smmpt, SBI_HART_EXT_SMMPT),
 	__SBI_HART_EXT_DATA(xsfcflushdlone, SBI_HART_EXT_XSIFIVE_CFLUSH_D_L1),
 	__SBI_HART_EXT_DATA(xsfcease, SBI_HART_EXT_XSIFIVE_CEASE),
 };
@@ -747,6 +751,10 @@ int sbi_hart_init(struct sbi_scratch *scratch, bool cold_boot)
 
 	if (cold_boot) {
 		rc = sbi_hart_pmp_init(scratch);
+		if (rc)
+			return rc;
+
+		rc = sbi_hart_smmpt_init(scratch);
 		if (rc)
 			return rc;
 	}

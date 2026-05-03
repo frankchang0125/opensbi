@@ -796,6 +796,9 @@
 #define CSR_VTYPE			0xc21
 #define CSR_VLENB			0xc22
 
+/* Smmpt CSRs */
+#define CSR_MMPT            0x382
+
 /* Custom CSR ranges */
 #define CSR_CUSTOM0_U_RW_BASE		0x800
 #define CSR_CUSTOM0_U_RW_COUNT		0x100

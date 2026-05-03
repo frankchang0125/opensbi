@@ -88,6 +88,21 @@ static void hart_context_set(struct sbi_domain *dom, u32 hartindex,
 	hart_context_get(sbi_domain_thishart_ptr(),			\
 			 current_hartindex())
 
+static void switch_domain_assignment(u32 hartindex,
+				     struct sbi_domain *from,
+				     struct sbi_domain *to)
+{
+	spin_lock(&from->assigned_harts_lock);
+	sbi_hartmask_clear_hartindex(hartindex, &from->assigned_harts);
+	spin_unlock(&from->assigned_harts_lock);
+
+	sbi_update_hartindex_to_domain(hartindex, to);
+
+	spin_lock(&to->assigned_harts_lock);
+	sbi_hartmask_set_hartindex(hartindex, &to->assigned_harts);
+	spin_unlock(&to->assigned_harts_lock);
+}
+
 /**
  * Switches the HART context from the current domain to the target domain.
  * This includes changing domain assignments and reconfiguring PMP, as well
@@ -105,26 +120,33 @@ static int switch_to_next_domain_context(struct hart_context *ctx,
 	struct sbi_trap_context *trap_ctx;
 	struct sbi_domain *current_dom, *target_dom;
 	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	int rc, rollback_rc;
 
 	if (!ctx || !dom_ctx || ctx == dom_ctx)
 		return SBI_EINVAL;
 
 	current_dom = ctx->dom;
 	target_dom = dom_ctx->dom;
-	/* Assign current hart to target domain */
-	spin_lock(&current_dom->assigned_harts_lock);
-	sbi_hartmask_clear_hartindex(hartindex, &current_dom->assigned_harts);
-	spin_unlock(&current_dom->assigned_harts_lock);
 
-	sbi_update_hartindex_to_domain(hartindex, target_dom);
-
-	spin_lock(&target_dom->assigned_harts_lock);
-	sbi_hartmask_set_hartindex(hartindex, &target_dom->assigned_harts);
-	spin_unlock(&target_dom->assigned_harts_lock);
-
-	/* Reconfigure PMP settings for the new domain */
+	/* Reconfigure hart protection settings (e.g., PMP) for the old domain */
 	sbi_hart_protection_unconfigure(scratch);
-	sbi_hart_protection_configure(scratch);
+
+	/* Assign current hart to target domain */
+	switch_domain_assignment(hartindex, current_dom, target_dom);
+
+	/* Reconfigure hart protection settings (e.g., PMP) for the new domain */
+	rc = sbi_hart_protection_configure(scratch);
+	if (rc) {
+		switch_domain_assignment(hartindex, target_dom, current_dom);
+
+		rollback_rc = sbi_hart_protection_configure(scratch);
+		if (rollback_rc)
+			sbi_panic("%s: failed to restore hart protection "
+				  "(target error %d, rollback error %d)\n",
+				  __func__, rc, rollback_rc);
+
+		return rc;
+	}
 
 	/* Save current CSR context and restore target domain's CSR context */
 	ctx->sstatus	= csr_swap(CSR_SSTATUS, dom_ctx->sstatus);

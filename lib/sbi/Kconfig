@@ -46,6 +46,21 @@ config SBI_ECALL_FWFT
 	bool "Firmware Feature extension"
 	default y
 
+config SBI_DOMAIN_CONTEXT
+	bool "Domain context switching support (experimental)"
+	default n
+	help
+	  Enable support for domain context management, which provides
+	  infrastructure for domain context switching. This feature is
+	  currently experimental and not used by any standard SBI extensions.
+
+	  This adds context save/restore capabilities to allow runtime
+	  switching of HARTs between different security domains, which is
+	  useful for implementing secure domain suspension/resumption and
+	  CPU time-sharing between isolated domains.
+
+	  If unsure, say N.
+
 config SBI_ECALL_LEGACY
 	bool "SBI v0.1 legacy extensions"
 	default y

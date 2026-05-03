@@ -165,22 +165,38 @@ struct sbi_domain_memregion {
 	unsigned long flags;
 };
 
+struct sbi_domain_flatten_memregion {
+	/** Node in linked list of domain's flatten memory regions */
+	struct sbi_dlist node;
+	/** Pointer to the parent memregion */
+	struct sbi_domain_memregion *region;
+	/** Base address of flatten memory region */
+	unsigned long base;
+	/** Inclusive end address of flatten memory region */
+	unsigned long end;
+};
+
+/** Get inclusive end address of a domain memory region */
+static inline ulong sbi_domain_memregion_end(
+				const struct sbi_domain_memregion *reg)
+{
+	if (reg->order >= __riscv_xlen)
+		return ~0UL;
+
+	return reg->base + BIT(reg->order) - 1;
+}
+
 /** Check if regionA is sub-region of regionB */
 static inline bool sbi_domain_memregion_is_subset(
 				const struct sbi_domain_memregion *regA,
 				const struct sbi_domain_memregion *regB)
 {
 	ulong regA_start = regA->base;
-	ulong regA_mask = (regA->order >= __riscv_xlen) ? ~0UL : (BIT(regA->order) - 1);
-	ulong regA_end = regA_start + regA_mask;
+	ulong regA_end = sbi_domain_memregion_end(regA);
 	ulong regB_start = regB->base;
-	ulong regB_mask = (regB->order >= __riscv_xlen) ? ~0UL : (BIT(regB->order) - 1);
-	ulong regB_end = regB_start + regB_mask;
+	ulong regB_end = sbi_domain_memregion_end(regB);
 
-	if ((regB_start <= regA_start) &&
-	    (regA_start < regB_end) &&
-	    (regB_start < regA_end) &&
-	    (regA_end <= regB_end))
+	if (regB_start <= regA_start && regA_end <= regB_end)
 		return true;
 
 	return false;
@@ -204,6 +220,8 @@ struct sbi_domain {
 	const struct sbi_hartmask *possible_harts;
 	/** Array of memory regions terminated by a region with order zero */
 	struct sbi_domain_memregion *regions;
+	/** Linked list of flatten memory regions */
+	struct sbi_dlist flatten_list;
 	/** HART id of the HART booting this domain */
 	u32 boot_hartid;
 	/** Arg1 (or 'a1' register) of next booting stage for this domain */
