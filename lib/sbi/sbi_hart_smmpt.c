@@ -350,6 +350,12 @@ static int domain_smmpt_state_data_setup(struct sbi_domain *dom,
     if (rc)
         return rc;
 
+    sbi_dprintf("Smmpt: create root page table dom=%s sdid=%u "
+            "mpt=%p size=0x%lx level=%u\n",
+            dom->name, s->sdid, s->mpt,
+            sbi_hart_smmpt_page_table_size(mpt_pg_levels - 1),
+            mpt_pg_levels - 1);
+
     return SBI_OK;
 }
 
@@ -670,18 +676,27 @@ static int __sbi_hart_smmpt_set_mpte(unsigned long *mpt, u32 sdid,
      *   Smmpt43,52,64 = 2, 3, 4
      */
     u32 current_level = mpt_pg_levels - 1;
-    unsigned long *next_mptep, *mptep;
+    unsigned long *next_mptep, *mptep, old_mpte;
     unsigned long pgtable_size, ppn, diff;
 
-    if (current_level < target_level)
+    if (current_level < target_level) {
+        sbi_dprintf("Smmpt: invalid MPTE level sdid=%u addr=0x%lx "
+                "root_level=%u target_level=%u new=0x%lx\n",
+                sdid, addr, current_level, target_level, new_mpte);
         return SBI_EINVAL;
+    }
 
     next_mptep = mpt;
     mptep = &next_mptep[sbi_hart_smmpt_mpte_pn(addr, current_level)];
 
     while (current_level != target_level) {
-        if (sbi_hart_smmpt_is_leaf_mpte(*mptep))
+        if (sbi_hart_smmpt_is_leaf_mpte(*mptep)) {
+            sbi_dprintf("Smmpt: failed to set non-leaf MPTE sdid=%u "
+                    "current_level=%u target_level=%u addr=0x%lx mptep=%p "
+                    "mpte=0x%lx reason=leaf-conflict\n",
+                    sdid, current_level, target_level, addr, mptep, *mptep);
             return SBI_EALREADY;
+        }
 
         if (!*mptep) {
             /* Allocate child page table. */
@@ -689,12 +704,22 @@ static int __sbi_hart_smmpt_set_mpte(unsigned long *mpt, u32 sdid,
             next_mptep = sbi_aligned_alloc_from(smmpt_hpctrl,
                 pgtable_size, pgtable_size);
 
-            if (!next_mptep)
+            if (!next_mptep) {
+                sbi_dprintf("Smmpt: failed to set non-leaf MPTE sdid=%u "
+                        "current_level=%u target_level=%u addr=0x%lx mptep=%p "
+                        "child_size=0x%lx reason=out-of-memory\n",
+                        sdid, current_level, target_level, addr, mptep,
+                        pgtable_size);
                 return SBI_ENOMEM;
+            }
 
             memset(next_mptep, 0, pgtable_size);
             sbi_hart_smmpt_nonleaf_mpte(mptep,
                 (unsigned long)next_mptep >> PAGE_SHIFT);
+            sbi_dprintf("Smmpt: set non-leaf MPTE sdid=%u current_level=%u "
+                    "addr=0x%lx mptep=%p child=%p child_size=0x%lx mpte=0x%lx\n",
+                    sdid, current_level, addr, mptep, next_mptep,
+                    pgtable_size, *mptep);
         } else {
             ppn = sbi_hart_smmpt_mpte_ppn(*mptep);
             next_mptep = (unsigned long *)(ppn << PAGE_SHIFT);
@@ -703,8 +728,14 @@ static int __sbi_hart_smmpt_set_mpte(unsigned long *mpt, u32 sdid,
         mptep = &next_mptep[sbi_hart_smmpt_mpte_pn(addr, --current_level)];
     }
 
-    if (*mptep && !sbi_hart_smmpt_is_leaf_mpte(*mptep))
+    if (*mptep && !sbi_hart_smmpt_is_leaf_mpte(*mptep)) {
+        sbi_dprintf("Smmpt: failed to set leaf MPTE sdid=%u current_level=%u "
+                "napot=%u addr=0x%lx mptep=%p old=0x%lx new=0x%lx "
+                "reason=non-leaf-conflict\n",
+                sdid, current_level, sbi_hart_smmpt_is_napot_mpte(*mptep),
+                addr, mptep, *mptep, new_mpte);
         return SBI_EALREADY;
+    }
 
     /*
      * Reject replacing an existing valid leaf MPTE with another valid leaf MPTE
@@ -714,14 +745,25 @@ static int __sbi_hart_smmpt_set_mpte(unsigned long *mpt, u32 sdid,
     if (sbi_hart_smmpt_is_valid_mpte(*mptep) &&
         sbi_hart_smmpt_is_valid_mpte(new_mpte) &&
         (sbi_hart_smmpt_is_napot_mpte(*mptep) !=
-            sbi_hart_smmpt_is_napot_mpte(new_mpte)))
+            sbi_hart_smmpt_is_napot_mpte(new_mpte))) {
+        sbi_dprintf("Smmpt: failed to set leaf MPTE sdid=%u current_level=%u "
+                "napot=%u addr=0x%lx mptep=%p old=0x%lx new=0x%lx "
+                "reason=napot-conflict\n",
+                sdid, current_level, sbi_hart_smmpt_is_napot_mpte(*mptep),
+                addr, mptep, *mptep, new_mpte);
         return SBI_EALREADY;
+    }
 
+    old_mpte = *mptep;
     new_mpte = (*mptep & ~mpte_mask) | (new_mpte & mpte_mask);
     diff = new_mpte ^ *mptep;
 
     if (diff) {
         *mptep = new_mpte;
+        sbi_dprintf("Smmpt: set leaf MPTE sdid=%u current_level=%u napot=%u "
+                "addr=0x%lx mptep=%p old=0x%lx new=0x%lx\n",
+                sdid, current_level, sbi_hart_smmpt_is_napot_mpte(new_mpte),
+                addr, mptep, old_mpte, new_mpte);
 
         /*
          * Fence is not required when the change is from invalid to valid only.

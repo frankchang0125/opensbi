@@ -541,6 +541,54 @@ bool sbi_domain_check_addr_range(const struct sbi_domain *dom,
 	return true;
 }
 
+static void sbi_flatten_dump(const struct sbi_domain *dom, const char *suffix)
+{
+    u32 i = 0, k;
+    struct sbi_domain_flatten_memregion *freg;
+    struct sbi_domain_memregion *reg;
+
+    sbi_dprintf("\n");
+
+    sbi_list_for_each_entry(freg, &dom->flatten_list, node) {
+        reg = freg->region;
+
+        sbi_dprintf("Domain%d Flatten%02d   %s: 0x%" PRILX "-0x%" PRILX " ",
+               dom->index, i, suffix, freg->base, freg->end);
+
+        k = 0;
+        sbi_dprintf("M: ");
+        if (reg->flags & SBI_DOMAIN_MEMREGION_MMIO)
+            sbi_dprintf("%cI", (k++) ? ',' : '(');
+        if (reg->flags & SBI_DOMAIN_MEMREGION_FW)
+            sbi_dprintf("%cF", (k++) ? ',' : '(');
+        if (reg->flags & SBI_DOMAIN_MEMREGION_M_READABLE)
+            sbi_dprintf("%cR", (k++) ? ',' : '(');
+        if (reg->flags & SBI_DOMAIN_MEMREGION_M_WRITABLE)
+            sbi_dprintf("%cW", (k++) ? ',' : '(');
+        if (reg->flags & SBI_DOMAIN_MEMREGION_M_EXECUTABLE)
+            sbi_dprintf("%cX", (k++) ? ',' : '(');
+        sbi_dprintf("%s ", (k++) ? ")" : "()");
+
+        k = 0;
+        sbi_dprintf("S/U: ");
+        if (reg->flags & SBI_DOMAIN_MEMREGION_SU_READABLE)
+            sbi_dprintf("%cR", (k++) ? ',' : '(');
+        if (reg->flags & SBI_DOMAIN_MEMREGION_SU_WRITABLE)
+            sbi_dprintf("%cW", (k++) ? ',' : '(');
+        if (reg->flags & SBI_DOMAIN_MEMREGION_SU_EXECUTABLE)
+            sbi_dprintf("%cX", (k++) ? ',' : '(');
+        sbi_dprintf("%s", (k++) ? ")" : "()");
+
+        if (reg->flags & SBI_DOMAIN_MEMREGION_SMMPT)
+            sbi_dprintf(" SMMPT");
+        sbi_dprintf("\n");
+
+        i++;
+    }
+
+    sbi_dprintf("\n");
+}
+
 void sbi_domain_dump(const struct sbi_domain *dom, const char *suffix)
 {
 	u32 i, j, k;
@@ -602,6 +650,9 @@ void sbi_domain_dump(const struct sbi_domain *dom, const char *suffix)
 
 		i++;
 	}
+
+	/* Dump the flatten memory regions. */
+	sbi_flatten_dump(dom, suffix);
 
 	sbi_printf("Domain%d Next Address%s: 0x%" PRILX "\n",
 		   dom->index, suffix, dom->next_addr);
