@@ -594,7 +594,11 @@ void sbi_domain_dump(const struct sbi_domain *dom, const char *suffix)
 			sbi_printf("%cW", (k++) ? ',' : '(');
 		if (reg->flags & SBI_DOMAIN_MEMREGION_SU_EXECUTABLE)
 			sbi_printf("%cX", (k++) ? ',' : '(');
-		sbi_printf("%s\n", (k++) ? ")" : "()");
+		sbi_printf("%s", (k++) ? ")" : "()");
+
+		if (reg->flags & SBI_DOMAIN_MEMREGION_SMMPT)
+			sbi_printf(" SMMPT");
+		sbi_printf("\n");
 
 		i++;
 	}
@@ -666,6 +670,8 @@ int sbi_domain_register(struct sbi_domain *dom,
 	}
 
 	sbi_list_add_tail(&dom->node, &domain_list);
+
+	SBI_INIT_LIST_HEAD(&dom->flatten_list);
 
 	/* Assign index to domain */
 	dom->index = domain_count++;
@@ -798,6 +804,206 @@ int sbi_domain_root_add_memrange(unsigned long addr, unsigned long size,
 	return 0;
 }
 
+/*
+ * Find the top-priority domain memory region that overlaps with
+ * the given address range.
+ */
+static int sbi_domain_flatten_find_region(struct sbi_domain *dom,
+                      unsigned long base,
+                      unsigned long end,
+                      struct sbi_domain_memregion **out_reg)
+{
+    struct sbi_domain_memregion *reg, *first = NULL, *smmpt = NULL;
+
+    sbi_domain_for_each_memregion(dom, reg) {
+        if (reg->base > base || end > sbi_domain_memregion_end(reg))
+            continue;
+
+        if (!first)
+            first = reg;
+
+        /*
+         * Smmpt page table memory must be selected as one complete flatten region.
+         * Reject if it would be split across multiple flatten regions or hidden
+         * by a higher-priority region.
+         */
+        if (reg->flags & SBI_DOMAIN_MEMREGION_SMMPT) {
+            if (reg->base != base ||
+                sbi_domain_memregion_end(reg) != end)
+                return SBI_EBAD_RANGE;
+
+            smmpt = reg;
+        }
+    }
+
+    if (smmpt && first != smmpt)
+        return SBI_EBAD_RANGE;
+
+    if (out_reg)
+        *out_reg = first;
+
+    return SBI_OK;
+}
+
+/*
+ * Add @boundary to the @bounds array.
+ */
+static int sbi_domain_flatten_add_boundary(unsigned long *bounds,
+                       u32 *bound_count, unsigned long boundary)
+{
+    for (u32 i = 0; i < *bound_count; i++) {
+        if (bounds[i] == boundary)
+            return 0;
+    }
+
+    bounds[(*bound_count)++] = boundary;
+
+    return 0;
+}
+
+/*
+ * Allocate a new flatten memory region and initialize it with the given parameters.
+ */
+static int sbi_domain_flatten_memregion_alloc(struct sbi_domain_flatten_memregion **freg,
+                struct sbi_domain_memregion *reg,
+                unsigned long base, unsigned long end)
+{
+    struct sbi_domain_flatten_memregion *f;
+
+    f = sbi_calloc(sizeof(struct sbi_domain_flatten_memregion), 1);
+    if (!f)
+        return SBI_ENOMEM;
+
+    SBI_INIT_LIST_HEAD(&f->node);
+    f->region = reg;
+    f->base = base;
+    f->end = end;
+
+    *freg = f;
+
+    return 0;
+}
+
+/*
+ * Flatten the memory regions of all domains.
+ *
+ * Unlike PMP, which can directly handle overlapping memory regions and applies
+ * the highest-priority matching region, hart protection mechanisms like Smmpt
+ * require non-overlapping memory regions to create memory protection mappings.
+ *
+ * Therefore, we flatten the memory regions of each domain into a
+ * non-overlapping "flatten view". Each flattened memory region is resolved
+ * from the highest-priority memory region that overlaps the address range.
+ *
+ * For example, consider the domain memory regions below:
+ *
+ * addr: 0x00000000     0x80000000    0x80200000    0x90000000          0xffffffff
+ *       |--------------|-------------|-------------|-------------------|
+ * FW:                  [M:RX S/U:---]
+ * RAM:                 [M:RW S/U:RWX--------------------]
+ * ALL:  [M:--- S/U:RWX-------------------------------------------------]
+ *
+ * are flattened into the view below:
+ *
+ * addr: 0x00000000     0x80000000    0x80200000    0x90000000          0xffffffff
+ *       |--------------|-------------|-------------|-------------------|
+ * perm: [M:--- S/U:RWX][M:RX S/U:---][M:RW S/U:RWX------][M:--- S/U:RWX]
+ *       [     ALL     ][     FW     ][        RAM       ][     ALL     ]
+ *
+ * with the flattened memory regions sorted by address in ascending order.
+ *
+ * The flattened memory regions are stored in @dom->flatten_list of each domain.
+ */
+static int sbi_domain_flatten_memregions(void)
+{
+    struct sbi_domain *dom;
+    struct sbi_domain_memregion *reg;
+    struct sbi_domain_flatten_memregion *freg;
+    unsigned long *bounds, end, tmp;
+    u32 bound_count, count, i, j;
+    int rc;
+
+    sbi_domain_for_each(dom) {
+        count = sbi_domain_used_memregions(dom);
+        if (!count) {
+            sbi_panic("%s: domain %s should have at least one memory region\n",
+                __func__, dom->name);
+            return SBI_EFAIL;
+        }
+
+        bounds = sbi_calloc(sizeof(*bounds), count * 2);
+        if (!bounds)
+            return SBI_ENOMEM;
+
+        bound_count = 0;
+
+        /* Sweep all the boundaries. */
+        sbi_domain_for_each_memregion(dom, reg) {
+            /* Boundary = memory region start. */
+            rc = sbi_domain_flatten_add_boundary(bounds,
+                                &bound_count, reg->base);
+            if (rc)
+                goto error;
+
+            /* Boundary = memory region end + 1. */
+            end = sbi_domain_memregion_end(reg);
+            if (end != ~0UL) {
+                rc = sbi_domain_flatten_add_boundary(bounds,
+                                    &bound_count,
+                                    end + 1);
+                if (rc)
+                    goto error;
+            }
+        }
+
+        /* Sort the boundaries in the ascending order. */
+        for (i = 0; i < bound_count; i++) {
+            for (j = i + 1; j < bound_count; j++) {
+                if (bounds[i] <= bounds[j])
+                    continue;
+
+                tmp = bounds[i];
+                bounds[i] = bounds[j];
+                bounds[j] = tmp;
+            }
+        }
+
+        /*
+         * Scan the memory regions that overlaps the boundaries.
+         * Memory regions are sorted in the priority order so we can pick
+         * the first region that overlaps with the boundary and create
+         * the flatten memory region.
+         */
+        for (i = 0; i < bound_count; i++) {
+            end = (i + 1 < bound_count) ? bounds[i + 1] - 1 : ~0UL;
+
+            rc = sbi_domain_flatten_find_region(dom, bounds[i], end,
+                                &reg);
+            if (rc)
+                goto error;
+
+            if (!reg)
+                continue;
+
+            /* Allocate and add the flatten memory region to the list. */
+            rc = sbi_domain_flatten_memregion_alloc(&freg, reg,
+                                bounds[i], end);
+            if (rc)
+                goto error;
+
+            sbi_list_add_tail(&freg->node, &dom->flatten_list);
+        }
+
+        sbi_free(bounds);
+    }
+
+    return 0;
+
+error:
+    sbi_free(bounds);
+    return rc;
+}
+
 int sbi_domain_startup(struct sbi_scratch *scratch, u32 cold_hartid)
 {
 	int rc;
@@ -869,6 +1075,12 @@ int sbi_domain_finalize(struct sbi_scratch *scratch)
 	if (rc) {
 		sbi_printf("%s: platform domains_init() failed (error %d)\n",
 			   __func__, rc);
+		return rc;
+	}
+
+	rc = sbi_domain_flatten_memregions();
+	if (rc) {
+		// TODO: error log
 		return rc;
 	}
 
