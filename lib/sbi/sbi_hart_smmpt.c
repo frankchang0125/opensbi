@@ -4,6 +4,7 @@
  * Copyright (c) 2026 SiFive Inc.
  */
 
+#include <libfdt.h>
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_atomic.h>
 #include <sbi/riscv_barrier.h>
@@ -18,6 +19,7 @@
 #include <sbi/sbi_string.h>
 #include <sbi/sbi_types.h>
 #include <sbi/sbi_hart_smmpt.h>
+#include <sbi_utils/fdt/fdt_helper.h>
 
 #if __riscv_xlen == 32
 #define MMPT_PPN_MASK           _UL(0x003FFFFF)
@@ -763,6 +765,14 @@ static int sbi_hart_smmpt_map_freg(struct smmpt_state *s,
     unsigned long end = MIN(freg->end, sbi_hart_smmpt_max_addr());
 
     /*
+     * Do not map Smmpt page-table backing memory through Smmpt itself.
+     * This avoids recursive mappings; PMP/Smepmp protects this M-mode-only
+     * region from S/U-mode.
+     */
+    if (freg->region->flags & SBI_DOMAIN_MEMREGION_SMMPT)
+        return SBI_OK;
+
+    /*
      * Do not create Smmpt mappings that exceed the maximum
      * physical address space it can support.
      */
@@ -779,6 +789,9 @@ static int sbi_hart_smmpt_unmap_freg(struct smmpt_state *s,
                 struct sbi_domain_flatten_memregion *freg)
 {
     unsigned long end = MIN(freg->end, sbi_hart_smmpt_max_addr());
+
+    if (freg->region->flags & SBI_DOMAIN_MEMREGION_SMMPT)
+        return SBI_OK;
 
     if (freg->base > end)
         return SBI_OK;
@@ -906,6 +919,69 @@ static struct sbi_hart_protection smmpt_protection = {
     .unconfigure = sbi_hart_smmpt_unconfigure,
 };
 
+static int fdt_setup_smmpt(void)
+{
+    const void *fdt = fdt_get_address();
+    u64 base64, size64;
+    unsigned long base, size;
+    int node;
+    int rc;
+
+    /* Parse the memory region reserved for Smmpt page table. */
+    node = fdt_path_offset(fdt, "/reserved-memory");
+    if (node < 0)
+        return SBI_ENOENT;
+
+    node = fdt_node_offset_by_compatible(fdt, node, "opensbi,smmpt");
+    if (node < 0)
+        return SBI_ENOENT;
+
+    rc = fdt_get_node_addr_size(fdt, node, 0, &base64, &size64);
+    if (rc)
+        return rc;
+
+    if (base64 > ~0UL || size64 > ~0UL)
+        return SBI_EINVALID_ADDR;
+
+    base = (unsigned long)base64;
+    size = (unsigned long)size64;
+
+    if (!size || (base & (PAGE_SIZE - 1)) || (size & (PAGE_SIZE - 1)))
+        return SBI_EINVAL;
+
+    rc = sbi_heap_alloc_new(&smmpt_hpctrl);
+    if (rc)
+        return rc;
+
+    if (!smmpt_hpctrl)
+        return SBI_ENOMEM;
+
+    rc = sbi_heap_init_new(smmpt_hpctrl, base, size);
+    if (rc) {
+        sbi_free(smmpt_hpctrl);
+        smmpt_hpctrl = NULL;
+        return rc;
+    }
+
+    /*
+     * Add the Smmpt page table memory region to the root domain.
+     * Only M-mode can access this memory region and it is not accessible to
+     * S/U-mode at all.
+     * Also, mark it as the SMMPT memory region so that it won't be mapped by
+     * Smmpt recursively.
+     */
+    rc = sbi_domain_root_add_memrange(base, size, PAGE_SIZE,
+        SBI_DOMAIN_MEMREGION_M_READABLE | SBI_DOMAIN_MEMREGION_M_WRITABLE |
+        SBI_DOMAIN_MEMREGION_SMMPT);
+    if (rc) {
+        sbi_free(smmpt_hpctrl);
+        smmpt_hpctrl = NULL;
+        return rc;
+    }
+
+    return SBI_OK;
+}
+
 int sbi_hart_smmpt_init(struct sbi_scratch *scratch)
 {
     int rc;
@@ -913,6 +989,10 @@ int sbi_hart_smmpt_init(struct sbi_scratch *scratch)
     if (sbi_hart_has_extension(scratch, SBI_HART_EXT_SMSDID) &&
         sbi_hart_has_extension(scratch, SBI_HART_EXT_SMMPT)) {
         rc = sbi_hart_smmpt_detect();
+        if (rc)
+            return rc;
+
+        rc = fdt_setup_smmpt();
         if (rc)
             return rc;
 

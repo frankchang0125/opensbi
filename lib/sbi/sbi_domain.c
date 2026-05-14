@@ -594,7 +594,11 @@ void sbi_domain_dump(const struct sbi_domain *dom, const char *suffix)
 			sbi_printf("%cW", (k++) ? ',' : '(');
 		if (reg->flags & SBI_DOMAIN_MEMREGION_SU_EXECUTABLE)
 			sbi_printf("%cX", (k++) ? ',' : '(');
-		sbi_printf("%s\n", (k++) ? ")" : "()");
+		sbi_printf("%s", (k++) ? ")" : "()");
+
+		if (reg->flags & SBI_DOMAIN_MEMREGION_SMMPT)
+			sbi_printf(" [SMMPT]");
+		sbi_printf("\n");
 
 		i++;
 	}
@@ -809,7 +813,7 @@ static int sbi_domain_flatten_find_region(struct sbi_domain *dom,
                       unsigned long end,
                       struct sbi_domain_memregion **out_reg)
 {
-    struct sbi_domain_memregion *reg, *first = NULL;
+    struct sbi_domain_memregion *reg, *first = NULL, *smmpt = NULL;
 
     sbi_domain_for_each_memregion(dom, reg) {
         if (reg->base > base || end > sbi_domain_memregion_end(reg))
@@ -817,7 +821,23 @@ static int sbi_domain_flatten_find_region(struct sbi_domain *dom,
 
         if (!first)
             first = reg;
+
+        /*
+         * Smmpt page table memory must be selected as one complete flatten region.
+         * Reject if it would be split across multiple flatten regions or hidden
+         * by a higher-priority region.
+         */
+        if (reg->flags & SBI_DOMAIN_MEMREGION_SMMPT) {
+            if (reg->base != base ||
+                sbi_domain_memregion_end(reg) != end)
+                return SBI_EBAD_RANGE;
+
+            smmpt = reg;
+        }
     }
+
+    if (smmpt && first != smmpt)
+        return SBI_EBAD_RANGE;
 
     if (out_reg)
         *out_reg = first;

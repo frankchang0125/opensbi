@@ -161,6 +161,7 @@ struct sbi_domain_memregion {
 
 #define SBI_DOMAIN_MEMREGION_MMIO		(1UL << 31)
 #define SBI_DOMAIN_MEMREGION_FW			(1UL << 30)
+#define SBI_DOMAIN_MEMREGION_SMMPT		(1UL << 29)
 	unsigned long flags;
 };
 
