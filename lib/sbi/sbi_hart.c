@@ -17,6 +17,7 @@
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_hart.h>
 #include <sbi/sbi_hart_pmp.h>
+#include <sbi/sbi_hart_smmpt.h>
 #include <sbi/sbi_platform.h>
 #include <sbi/sbi_pmu.h>
 #include <sbi/sbi_string.h>
@@ -749,6 +750,10 @@ int sbi_hart_init(struct sbi_scratch *scratch, bool cold_boot)
 
 	if (cold_boot) {
 		rc = sbi_hart_pmp_init(scratch);
+		if (rc)
+			return rc;
+
+		rc = sbi_hart_smmpt_init(scratch);
 		if (rc)
 			return rc;
 	}
