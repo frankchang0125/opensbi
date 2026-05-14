@@ -12,6 +12,11 @@
 
 struct sbi_scratch;
 
+typedef enum {
+	SBI_HART_PROT_GROUP_PMP = 0,
+	SBI_HART_PROT_GROUP_MAX,
+} sbi_hart_prot_group_id;
+
 /** Representation of hart protection mechanism */
 struct sbi_hart_protection {
 	/** List head */
@@ -20,7 +25,11 @@ struct sbi_hart_protection {
 	/** Name of the hart protection mechanism */
 	char name[32];
 
-	/** Ratings of the hart protection mechanism (higher is better) */
+	sbi_hart_prot_group_id group_id;
+
+	/**
+	 * Ratings of the hart protection mechanism within the group (higher is better)
+	 */
 	unsigned long rating;
 
 	/** Configure protection for current HART (Mandatory) */

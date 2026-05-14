@@ -369,6 +369,7 @@ static void eswin_eic7700_pmp_unconfigure(struct sbi_scratch *scratch)
 
 static struct sbi_hart_protection eswin_eic7700_pmp_protection = {
 	.name = "eic7700_pmp",
+	.group_id = SBI_HART_PROT_GROUP_PMP,
 	.rating = -1UL,
 	.configure = eswin_eic7700_pmp_configure,
 	.unconfigure = eswin_eic7700_pmp_unconfigure,
