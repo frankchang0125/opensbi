@@ -427,23 +427,44 @@ static int __sbi_hart_smmpt_zap_mpte(u32 sdid, unsigned long addr,
                 bool *need_fence, bool free_pages)
 {
     unsigned long *next_mptep, ppn;
-    u32 num_next_mptes, start_pg, num_pages;
+    u32 num_next_mptes, start_pg, page_order, num_pages;
     bool free_next_pgtable = true;
     int rc;
 
     if (!mptep || !*mptep) {
         return SBI_EINVAL;
     } else if (sbi_hart_smmpt_is_leaf_mpte(*mptep)) {
-        start_pg = sbi_hart_smmpt_start_pg(addr, current_level);
-        num_pages = MIN(size >> PAGE_SHIFT, PAGES_PER_MPTE - start_pg);
-        *zap_size = (unsigned long)num_pages << PAGE_SHIFT;
+        page_order = sbi_hart_smmpt_page_order(current_level);
 
-        if (start_pg == 0 && num_pages == PAGES_PER_MPTE) {
-            /* Clear the whole leaf MPTE. */
-            *mptep = 0;
+        if (sbi_hart_smmpt_is_napot_mpte(*mptep)) {
+            /* Check if the address is aligned to NAPOT page size. */
+            rc = sbi_hart_smmpt_check_addr_size(addr, size,
+                page_order + NAPOT_NUM_PAGES_ORDER);
+            if (rc)
+                return rc;
+
+            *zap_size = BIT(page_order + NAPOT_NUM_PAGES_ORDER);
+
+            /* Clear all NAPOT leaf MPTEs. */
+            for (u32 i = 0; i < (1 << (NAPOT_G + 1)); i++)
+                mptep[i] = 0;
         } else {
-            /* Clear the corresponding MPTE XWR bits. */
-            sbi_hart_smmpt_mpte_set_xwr(mptep, false, 0, start_pg, num_pages);
+            /* Check if the address is aligned to non-NAPOT page size. */
+            rc = sbi_hart_smmpt_check_addr_size(addr, size, page_order);
+            if (rc)
+                return rc;
+
+            start_pg = sbi_hart_smmpt_start_pg(addr, current_level);
+            num_pages = MIN(size >> page_order, PAGES_PER_MPTE - start_pg);
+            *zap_size = (unsigned long)num_pages << page_order;
+
+            if (start_pg == 0 && num_pages == PAGES_PER_MPTE) {
+                /* Clear the whole leaf MPTE. */
+                *mptep = 0;
+            } else {
+                /* Clear the corresponding MPTE XWR bits. */
+                sbi_hart_smmpt_mpte_set_xwr(mptep, false, 0, start_pg, num_pages);
+            }
         }
 
         *need_fence = true;
@@ -544,6 +565,108 @@ static int __sbi_hart_smmpt_unmap_pages(unsigned long *mpt, u32 sdid,
 }
 
 /*
+ * Resolve one mapping chunk within a single MPTE. The resolved mapping must not
+ * cross the address span covered by one MPTE at the selected level.
+ *
+ * When @use_4k_pg is false, resolve one MPTE-sized mapping from the highest
+ * level down. At each level, try NAPOT first, then a non-NAPOT leaf. If neither
+ * fits, descend to the next lower level.
+ * The returned mapping never crosses the current MPTE span.
+ *   - For NAPOT mapping, the address must be aligned to the NAPOT page size.
+ *   - For hugepage non-NAPOT mapping, the address must be aligned to the
+ *     hugepage size, and cannot be partially mapped within the MPTE span.
+ *   - For normal non-NAPOT 4 KiB mapping, the address must be aligned to 4 KiB,
+ *     and can be partially mapped within the MPTE span.
+ *
+ * When @use_4k_pg is true, resolve one MPTE-sized mapping using non-NAPOT
+ * 4 KiB mapping only.
+ */
+static int sbi_hart_smmpt_resolve_map_mpte(unsigned long addr,
+                unsigned long size, bool use_4k_pg, u32 *out_level,
+                u32 *out_start_pg, u32 *out_num_pages, bool *out_napot)
+{
+    u32 current_level, num_pages = 0;
+    bool napot = false;
+    u32 page_order = PAGE_SHIFT;
+    u32 mpte_span_order, napot_page_order, start_pg;
+
+    /*
+     * current_level (starting from index 0):
+     *   Smmpt34 = 1
+     *   Smmpt43,52,64 = 2, 3, 4
+     */
+    current_level = use_4k_pg ? 0 : (mpt_pg_levels - 1);
+    page_order = sbi_hart_smmpt_page_order(current_level);
+    mpte_span_order = page_order + NUM_PG_BITS_IN_RANGE;
+    napot_page_order = page_order + NAPOT_NUM_PAGES_ORDER;
+
+    /* Try to map using hugepage or NAPOT. */
+    while (true) {
+        /*
+         * Check if we could map with NAPOT.
+         * It's pointless for Smmpt34 to map with NAPOT at level 1
+         * as it creates a 4 GiB mapping.
+         */
+        if (!use_4k_pg &&
+            !(__riscv_xlen == 32 && current_level == (mpt_pg_levels - 1))) {
+            /* Check if addr is aligned to NAPOT page size. */
+            if (sbi_hart_smmpt_check_addr_size(addr, size,
+                    napot_page_order)) {
+                goto hugepage;
+            }
+
+            /* Map at most one NAPOT. */
+            napot = true;
+            start_pg = 0;
+            /* NAPOT is comprised of 2^(G+1) MPTEs. */
+            num_pages = NAPOT_NUM_PAGES;
+            goto resolved;
+        }
+
+hugepage:
+        if (current_level == 0)
+            break;
+
+        /*
+         * Hugepage MPTEs can be either leaf or non-leaf. If a range
+         * starts in the middle of such an MPTE span, use a lower-level
+         * table so the same MPTE slot is not used as both leaf and non-leaf.
+         * Level-0 has no child table, so partial mapping within the MPTE span
+         * is fine.
+         */
+        if (!sbi_hart_smmpt_check_addr_size(addr, size, mpte_span_order))
+            break;
+
+        /* Try to map with next lower-level mapping. */
+        page_order -= (current_level == 1) ? mpt_pte_indexes : 9;
+        mpte_span_order = page_order + NUM_PG_BITS_IN_RANGE;
+        napot_page_order = page_order + NAPOT_NUM_PAGES_ORDER;
+        current_level--;
+    }
+
+    /* Map within the current MPTE span. */
+    start_pg = sbi_hart_smmpt_start_pg(addr, current_level);
+    num_pages = MIN(size >> page_order, PAGES_PER_MPTE - start_pg);
+    if (!num_pages)
+        return SBI_EINVAL;
+
+resolved:
+    if (out_level)
+        *out_level = current_level;
+
+    if (out_start_pg)
+        *out_start_pg = start_pg;
+
+    if (out_num_pages)
+        *out_num_pages = num_pages;
+
+    if (out_napot)
+        *out_napot = napot;
+
+    return SBI_OK;
+}
+
+/*
  * Install one MPTE for the given address at the target level.
  *
  * Walks from the root MPT to the target level, allocating intermediate
@@ -598,6 +721,17 @@ static int __sbi_hart_smmpt_set_mpte(unsigned long *mpt, u32 sdid,
     if (*mptep && !sbi_hart_smmpt_is_leaf_mpte(*mptep))
         return SBI_EALREADY;
 
+    /*
+     * Reject replacing an existing valid leaf MPTE with another valid leaf MPTE
+     * that uses a different NAPOT encoding. Clearing a leaf MPTE with zero is
+     * allowed, so skip this check when the new MPTE is invalid.
+     */
+    if (sbi_hart_smmpt_is_valid_mpte(*mptep) &&
+        sbi_hart_smmpt_is_valid_mpte(new_mpte) &&
+        (sbi_hart_smmpt_is_napot_mpte(*mptep) !=
+            sbi_hart_smmpt_is_napot_mpte(new_mpte)))
+        return SBI_EALREADY;
+
     new_mpte = (*mptep & ~mpte_mask) | (new_mpte & mpte_mask);
     diff = new_mpte ^ *mptep;
 
@@ -622,12 +756,14 @@ static int __sbi_hart_smmpt_set_mpte(unsigned long *mpt, u32 sdid,
  * Note: Must be called with smmpt_state->mpt_lock held.
  */
 static int __sbi_hart_smmpt_map_pages(unsigned long *mpt, u32 sdid,
-                unsigned long addr, unsigned long size, unsigned long flags)
+                unsigned long addr, unsigned long size, unsigned long flags,
+                bool use_4k_pg)
 {
-    unsigned long cur_addr = addr;
+    unsigned long cur_addr = addr, napot_cur_addr;
     unsigned long remaining = size;
     unsigned long map_size = 0;
-    u32 xwr, start_pg, num_pages;
+    u32 xwr, level, start_pg, num_pages, page_order, i, rollback_i;
+    bool napot;
     unsigned long mpte, pages_size, mpte_mask;
     int rc, rollback_rc;
 
@@ -644,21 +780,65 @@ static int __sbi_hart_smmpt_map_pages(unsigned long *mpt, u32 sdid,
     }
 
     while (remaining) {
-        start_pg = sbi_hart_smmpt_start_pg(addr, 0);
-        num_pages = MIN(remaining >> PAGE_SHIFT, PAGES_PER_MPTE - start_pg);
-        pages_size = (unsigned long)num_pages << PAGE_SHIFT;
-
-        mpte = 0;
-        rc = sbi_hart_smmpt_leaf_mpte(&mpte, false, xwr, start_pg, num_pages);
+        rc = sbi_hart_smmpt_resolve_map_mpte(cur_addr, remaining, use_4k_pg,
+                        &level, &start_pg, &num_pages, &napot);
         if (rc)
             return rc;
 
-        /* Mask out the XWR bits that are not being set. */
-        mpte_mask = MPTE_VALID | MPTE_LEAF |
-            sbi_hart_smmpt_mpte_xwr_mask(false, start_pg, num_pages);
-        rc = __sbi_hart_smmpt_set_mpte(mpt, sdid, 0, cur_addr, mpte, mpte_mask);
+        page_order = sbi_hart_smmpt_page_order(level);
+        pages_size = (unsigned long)num_pages << page_order;
+
+        mpte = 0;
+        rc = sbi_hart_smmpt_leaf_mpte(&mpte, napot, xwr, start_pg, num_pages);
         if (rc)
-            goto rollback;
+            return rc;
+
+        if (napot) {
+            mpte_mask = MPTE_VALID | MPTE_LEAF | MPTE_NAPOT | MPTE_G |
+                (MPTE_XWR_MASK << MPTE_XWR_SHIFT);
+
+            /* NAPOT is comprised of 2^(G+1) MPTEs. */
+            for (i = 0; i < num_pages; i += PAGES_PER_MPTE) {
+                napot_cur_addr = cur_addr + ((unsigned long)i << page_order);
+
+                rc = __sbi_hart_smmpt_set_mpte(mpt, sdid, level,
+                        napot_cur_addr, mpte, mpte_mask);
+                if (rc) {
+                    /*
+                     * Rollback only the NAPOT MPTEs installed by this call.
+                     * The failed slot may belong to an existing mapping, so
+                     * do not zap the whole NAPOT range here.
+                     */
+                    for (rollback_i = 0; rollback_i < i;
+                         rollback_i += PAGES_PER_MPTE) {
+                        napot_cur_addr = cur_addr +
+                            ((unsigned long)rollback_i << page_order);
+
+                        rollback_rc = __sbi_hart_smmpt_set_mpte(mpt, sdid, level,
+                                        napot_cur_addr, 0, mpte_mask);
+                        if (rollback_rc)
+                            sbi_panic("%s: failed to rollback Smmpt NAPOT "
+                                "MPTE addr=0x%lx (map error %d, "
+                                "rollback error %d)\n", __func__,
+                                cur_addr + ((unsigned long)rollback_i <<
+                                page_order), rc, rollback_rc);
+                    }
+
+                    if (i)
+                        mfence_pa_sdid(sdid);
+
+                    goto rollback;
+                }
+            }
+        } else {
+            /* Mask out the XWR bits that are not being set. */
+            mpte_mask = MPTE_VALID | MPTE_LEAF |
+                sbi_hart_smmpt_mpte_xwr_mask(false, start_pg, num_pages);
+            rc = __sbi_hart_smmpt_set_mpte(mpt, sdid, level, cur_addr, mpte,
+                    mpte_mask);
+            if (rc)
+                goto rollback;
+        }
 
         cur_addr += pages_size;
         remaining -= pages_size;
@@ -724,7 +904,8 @@ static int sbi_hart_smmpt_unmap_range(struct smmpt_state *s,
 }
 
 static int sbi_hart_smmpt_map_range(struct smmpt_state *s,
-                unsigned long base, unsigned long end, unsigned long flags)
+                unsigned long base, unsigned long end, unsigned long flags,
+                bool use_4k_pg)
 {
     unsigned long cur = base, next, size;
     int rc, rollback_rc;
@@ -733,7 +914,8 @@ static int sbi_hart_smmpt_map_range(struct smmpt_state *s,
         next = sbi_hart_smmpt_range_end(cur, end);
         size = next - cur + 1;
 
-        rc = __sbi_hart_smmpt_map_pages(s->mpt, s->sdid, cur, size, flags);
+        rc = __sbi_hart_smmpt_map_pages(s->mpt, s->sdid, cur, size,
+                        flags, use_4k_pg);
         if (rc) {
             if (cur != base) {
                 rollback_rc = sbi_hart_smmpt_unmap_range(s, base, cur - 1, true);
@@ -779,7 +961,8 @@ static int sbi_hart_smmpt_map_freg(struct smmpt_state *s,
     if (freg->base > end)
         return SBI_OK;
 
-    return sbi_hart_smmpt_map_range(s, freg->base, end, freg->region->flags);
+    return sbi_hart_smmpt_map_range(s, freg->base, end,
+                freg->region->flags, false);
 }
 
 /*
