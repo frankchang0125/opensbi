@@ -164,6 +164,18 @@ struct sbi_domain_memregion {
 	unsigned long flags;
 };
 
+/** Representation of OpenSBI domain memory region in flatten view */
+struct sbi_domain_flatten_memregion {
+	/** Node in linked list of domain's flatten memory regions */
+	struct sbi_dlist node;
+	/** Pointer to the parent memregion */
+	struct sbi_domain_memregion *region;
+	/** Base address of flatten memory region */
+	unsigned long base;
+	/** Inclusive end address of flatten memory region */
+	unsigned long end;
+};
+
 /** Get inclusive end address of a domain memory region */
 static inline ulong sbi_domain_memregion_end(
 				const struct sbi_domain_memregion *reg)
@@ -208,6 +220,8 @@ struct sbi_domain {
 	const struct sbi_hartmask *possible_harts;
 	/** Array of memory regions terminated by a region with order zero */
 	struct sbi_domain_memregion *regions;
+	/** Linked list of flatten memory regions */
+	struct sbi_dlist flatten_list;
 	/** HART id of the HART booting this domain */
 	u32 boot_hartid;
 	/** Arg1 (or 'a1' register) of next booting stage for this domain */
