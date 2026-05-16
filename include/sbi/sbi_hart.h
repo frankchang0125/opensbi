@@ -83,6 +83,10 @@ enum sbi_hart_extensions {
 	SBI_HART_EXT_SSQOSID,
 	/** HART has Ssstateen extension **/
 	SBI_HART_EXT_SSSTATEEN,
+	/** Hart has Smsdid extension */
+	SBI_HART_EXT_SMSDID,
+	/** Hart has Smmpt extension */
+	SBI_HART_EXT_SMMPT,
 	/** Hart has Xsfcflushdlone extension */
 	SBI_HART_EXT_XSIFIVE_CFLUSH_D_L1,
 	/** Hart has Xsfcease extension */

@@ -14,6 +14,7 @@ struct sbi_scratch;
 
 typedef enum {
 	SBI_HART_PROT_GROUP_PMP = 0,
+	SBI_HART_PROT_GROUP_SMMPT,
 	SBI_HART_PROT_GROUP_MAX,
 } sbi_hart_prot_group_id;
 
