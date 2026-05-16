@@ -366,6 +366,12 @@ static int domain_smmpt_state_data_setup(struct sbi_domain *dom,
     if (rc)
         return rc;
 
+    sbi_dprintf("Smmpt: create root page table dom=%s sdid=%u "
+            "mpt=%p size=0x%lx level=%u\n",
+            dom->name, s->sdid, s->mpt,
+            sbi_hart_smmpt_page_table_size(mpt_pg_levels - 1),
+            mpt_pg_levels - 1);
+
     return SBI_OK;
 }
 
@@ -685,18 +691,27 @@ static int __sbi_hart_smmpt_set_mpte(unsigned long *mpt, u32 sdid,
      *   Smmpt43,52,64 = 2, 3, 4
      */
     u32 current_level = mpt_pg_levels - 1;
-    unsigned long *next_mptep, *mptep;
+    unsigned long *next_mptep, *mptep, old_mpte;
     unsigned long pgtable_size, ppn, diff;
 
-    if (current_level < target_level)
+    if (current_level < target_level) {
+        sbi_dprintf("Smmpt: invalid MPTE level sdid=%u addr=0x%lx "
+                "root_level=%u target_level=%u new=0x%lx\n",
+                sdid, addr, current_level, target_level, new_mpte);
         return SBI_EINVAL;
+    }
 
     next_mptep = mpt;
     mptep = &next_mptep[sbi_hart_smmpt_mpte_pn(addr, current_level)];
 
     while (current_level != target_level) {
-        if (sbi_hart_smmpt_is_leaf_mpte(*mptep))
+        if (sbi_hart_smmpt_is_leaf_mpte(*mptep)) {
+            sbi_dprintf("Smmpt: failed to set non-leaf MPTE sdid=%u "
+                    "current_level=%u target_level=%u addr=0x%lx mptep=%p "
+                    "mpte=0x%lx reason=leaf-conflict\n",
+                    sdid, current_level, target_level, addr, mptep, *mptep);
             return SBI_EALREADY;
+        }
 
         if (!*mptep) {
             /* Allocate child page table. */
@@ -704,12 +719,22 @@ static int __sbi_hart_smmpt_set_mpte(unsigned long *mpt, u32 sdid,
             next_mptep = sbi_aligned_alloc_from(smmpt_hpctrl,
                 pgtable_size, pgtable_size);
 
-            if (!next_mptep)
+            if (!next_mptep) {
+                sbi_dprintf("Smmpt: failed to set non-leaf MPTE sdid=%u "
+                        "current_level=%u target_level=%u addr=0x%lx mptep=%p "
+                        "child_size=0x%lx reason=out-of-memory\n",
+                        sdid, current_level, target_level, addr, mptep,
+                        pgtable_size);
                 return SBI_ENOMEM;
+            }
 
             sbi_memset(next_mptep, 0, pgtable_size);
             sbi_hart_smmpt_nonleaf_mpte(mptep,
                 (unsigned long)next_mptep >> PAGE_SHIFT);
+            sbi_dprintf("Smmpt: set non-leaf MPTE sdid=%u current_level=%u "
+                    "addr=0x%lx mptep=%p child=%p child_size=0x%lx mpte=0x%lx\n",
+                    sdid, current_level, addr, mptep, next_mptep,
+                    pgtable_size, *mptep);
         } else {
             ppn = sbi_hart_smmpt_mpte_ppn(*mptep);
             next_mptep = (unsigned long *)(ppn << PAGE_SHIFT);
@@ -718,8 +743,14 @@ static int __sbi_hart_smmpt_set_mpte(unsigned long *mpt, u32 sdid,
         mptep = &next_mptep[sbi_hart_smmpt_mpte_pn(addr, --current_level)];
     }
 
-    if (*mptep && !sbi_hart_smmpt_is_leaf_mpte(*mptep))
+    if (*mptep && !sbi_hart_smmpt_is_leaf_mpte(*mptep)) {
+        sbi_dprintf("Smmpt: failed to set leaf MPTE sdid=%u current_level=%u "
+                "napot=%u addr=0x%lx mptep=%p old=0x%lx new=0x%lx "
+                "reason=non-leaf-conflict\n",
+                sdid, current_level, sbi_hart_smmpt_is_napot_mpte(*mptep),
+                addr, mptep, *mptep, new_mpte);
         return SBI_EALREADY;
+    }
 
     /*
      * Reject replacing an existing valid leaf MPTE with another valid leaf MPTE
@@ -729,14 +760,25 @@ static int __sbi_hart_smmpt_set_mpte(unsigned long *mpt, u32 sdid,
     if (sbi_hart_smmpt_is_valid_mpte(*mptep) &&
         sbi_hart_smmpt_is_valid_mpte(new_mpte) &&
         (sbi_hart_smmpt_is_napot_mpte(*mptep) !=
-            sbi_hart_smmpt_is_napot_mpte(new_mpte)))
+            sbi_hart_smmpt_is_napot_mpte(new_mpte))) {
+        sbi_dprintf("Smmpt: failed to set leaf MPTE sdid=%u current_level=%u "
+                "napot=%u addr=0x%lx mptep=%p old=0x%lx new=0x%lx "
+                "reason=napot-conflict\n",
+                sdid, current_level, sbi_hart_smmpt_is_napot_mpte(*mptep),
+                addr, mptep, *mptep, new_mpte);
         return SBI_EALREADY;
+    }
 
+    old_mpte = *mptep;
     new_mpte = (*mptep & ~mpte_mask) | (new_mpte & mpte_mask);
     diff = new_mpte ^ *mptep;
 
     if (diff) {
         *mptep = new_mpte;
+        sbi_dprintf("Smmpt: set leaf MPTE sdid=%u current_level=%u napot=%u "
+                "addr=0x%lx mptep=%p old=0x%lx new=0x%lx\n",
+                sdid, current_level, sbi_hart_smmpt_is_napot_mpte(new_mpte),
+                addr, mptep, old_mpte, new_mpte);
 
         /*
          * Fence is not required when the change is from invalid to valid only.
@@ -885,14 +927,25 @@ static int sbi_hart_smmpt_unmap_range(struct smmpt_state *s,
     unsigned long cur = base, next, size;
     int rc;
 
+    sbi_dprintf("Smmpt: unmap range sdid=%u base=0x%lx end=0x%lx "
+            "free_pages=%u\n", s->sdid, base, end, free_pages);
+
     while (cur <= end) {
         next = sbi_hart_smmpt_range_end(cur, end);
         size = next - cur + 1;
 
+        sbi_dprintf("Smmpt: unmap chunk sdid=%u addr=0x%lx size=0x%lx "
+                "end=0x%lx free_pages=%u\n",
+                s->sdid, cur, size, next, free_pages);
+
         rc = __sbi_hart_smmpt_unmap_pages(s->mpt, s->sdid, cur, size,
                         free_pages);
-        if (rc)
+        if (rc) {
+            sbi_dprintf("Smmpt: failed to unmap chunk sdid=%u addr=0x%lx "
+                    "size=0x%lx end=0x%lx free_pages=%u error=%d\n",
+                    s->sdid, cur, size, next, free_pages, rc);
             return rc;
+        }
 
         if (next == end)
             break;
@@ -910,14 +963,31 @@ static int sbi_hart_smmpt_map_range(struct smmpt_state *s,
     unsigned long cur = base, next, size;
     int rc, rollback_rc;
 
+    sbi_dprintf("Smmpt: map range sdid=%u base=0x%lx end=0x%lx "
+            "flags=0x%lx use_4k_pg=%u\n",
+            s->sdid, base, end, flags, use_4k_pg);
+
     while (cur <= end) {
         next = sbi_hart_smmpt_range_end(cur, end);
         size = next - cur + 1;
 
+        sbi_dprintf("Smmpt: map chunk sdid=%u addr=0x%lx size=0x%lx "
+                "end=0x%lx flags=0x%lx use_4k_pg=%u\n",
+                s->sdid, cur, size, next, flags, use_4k_pg);
+
         rc = __sbi_hart_smmpt_map_pages(s->mpt, s->sdid, cur, size,
                         flags, use_4k_pg);
         if (rc) {
+            sbi_dprintf("Smmpt: failed to map chunk sdid=%u addr=0x%lx "
+                    "size=0x%lx end=0x%lx flags=0x%lx use_4k_pg=%u "
+                    "error=%d\n",
+                    s->sdid, cur, size, next, flags, use_4k_pg, rc);
+
             if (cur != base) {
+                sbi_dprintf("Smmpt: rollback mapped range sdid=%u "
+                        "base=0x%lx end=0x%lx due_to_error=%d\n",
+                        s->sdid, base, cur - 1, rc);
+
                 rollback_rc = sbi_hart_smmpt_unmap_range(s, base, cur - 1, true);
                 if (rollback_rc)
                     sbi_panic("%s: failed to rollback Smmpt mapping "
@@ -1003,6 +1073,10 @@ static int sbi_hart_smmpt_configure(struct sbi_scratch *scratch)
 
     if (populate_state == MPT_STATE_NOT_POPULATED) {
         /* This hart won the race and will populate the MPT. */
+        sbi_dprintf("Smmpt: hart%d populating MPT for domain '%s'"
+                " sdid=%u\n",
+                current_hartid(), dom->name, s->sdid);
+
         spin_lock(&s->mpt_lock);
 
         /* Create the Smmpt mappings of the flatten regions for the domain. */
@@ -1020,11 +1094,19 @@ static int sbi_hart_smmpt_configure(struct sbi_scratch *scratch)
          */
         smp_wmb();
         atomic_write(&s->mpt_populate_state, MPT_STATE_POPULATED);
+
+        sbi_dprintf("Smmpt: hart%d finished populating MPT"
+                " for domain '%s' sdid=%u\n",
+                current_hartid(), dom->name, s->sdid);
     } else if (populate_state == MPT_STATE_POPULATING) {
         /*
          * Another hart is currently populating MPT,
          * wait for MPT to be populated.
          */
+        sbi_dprintf("Smmpt: hart%d waiting for MPT population"
+                " of domain '%s' sdid=%u\n",
+                current_hartid(), dom->name, s->sdid);
+
         while (atomic_read(&s->mpt_populate_state) == MPT_STATE_POPULATING)
             cpu_relax();
 
@@ -1044,6 +1126,10 @@ static int sbi_hart_smmpt_configure(struct sbi_scratch *scratch)
                     dom->name, s->sdid);
             return SBI_EFAIL;
         }
+
+        sbi_dprintf("Smmpt: hart%d done waiting for MPT population"
+                " of domain '%s' sdid=%u\n",
+                current_hartid(), dom->name, s->sdid);
     } else if (populate_state == MPT_STATE_FAILED) {
         /* Another hart already tried and failed permanently. */
         sbi_printf("Smmpt: hart%d found domain '%s' sdid=%u"
