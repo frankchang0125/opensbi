@@ -164,20 +164,27 @@ struct sbi_domain_memregion {
 	unsigned long flags;
 };
 
+/** Get inclusive end address of a domain memory region */
+static inline ulong sbi_domain_memregion_end(
+				const struct sbi_domain_memregion *reg)
+{
+	if (reg->order >= __riscv_xlen)
+		return ~0UL;
+
+	return reg->base + BIT(reg->order) - 1;
+}
+
 /** Check if regionA is sub-region of regionB */
 static inline bool sbi_domain_memregion_is_subset(
 				const struct sbi_domain_memregion *regA,
 				const struct sbi_domain_memregion *regB)
 {
 	ulong regA_start = regA->base;
-	ulong regA_end = regA->base + (BIT(regA->order) - 1);
+	ulong regA_end = sbi_domain_memregion_end(regA);
 	ulong regB_start = regB->base;
-	ulong regB_end = regB->base + (BIT(regB->order) - 1);
+	ulong regB_end = sbi_domain_memregion_end(regB);
 
-	if ((regB_start <= regA_start) &&
-	    (regA_start < regB_end) &&
-	    (regB_start < regA_end) &&
-	    (regA_end <= regB_end))
+	if (regB_start <= regA_start && regA_end <= regB_end)
 		return true;
 
 	return false;
